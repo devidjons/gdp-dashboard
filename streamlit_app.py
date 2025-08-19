@@ -1,16 +1,19 @@
-"""
-Risk Assessment Visualization System — Streamlit (minimal, interactive)
-"""
-
+import streamlit as st
+import numpy as np
+import pandas as pd
+import altair as alt
 from dataclasses import dataclass
 from typing import Tuple
-import numpy as np
-import matplotlib.pyplot as plt
-from matplotlib.colors import LinearSegmentedColormap
-import streamlit as st
 
+# -----------------------------------------------------------------------------
+# Page setup
+st.set_page_config(
+    page_title="Risk Assessment Visualization",
+    page_icon="📊",
+)
 
-# --------------------------- Core model ---------------------------
+# -----------------------------------------------------------------------------
+# Core model (no matplotlib)
 
 @dataclass
 class DomainConfig:
@@ -18,9 +21,8 @@ class DomainConfig:
     x_max: float = 0.0
     y_min: float = 0.5
     y_max: float = 2.0
-    nx: int = 500   # slightly smaller for faster interaction
-    ny: int = 400
-
+    nx: int = 420   # tuned for responsiveness in-browser
+    ny: int = 320
 
 @dataclass
 class RiskParameters:
@@ -33,7 +35,6 @@ class RiskParameters:
 
     def get_gammas(self) -> np.ndarray:
         return np.array([self.gamma_deficit, self.gamma_normal, self.gamma_surplus], dtype=np.float64)
-
 
 class RiskMappingTable:
     def __init__(self):
@@ -53,9 +54,8 @@ class RiskMappingTable:
         return np.interp(gamma, self.inputs, self.outputs,
                          left=self.outputs[0], right=self.outputs[-1])
 
-
 class ParabolicMask:
-    """Log-y parabolic mask: (log y - l0)^2 <= k_log (x - x_min)"""
+    """(log y - l0)^2 <= k_log (x - x_min) in (x,y)-space."""
     def __init__(self, domain: DomainConfig):
         self.domain = domain
         self.l0 = 0.0
@@ -68,10 +68,9 @@ class ParabolicMask:
 
     def get_boundaries(self, xs: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         span_log = np.sqrt(np.maximum(0.0, self.k_log * (xs - self.domain.x_min)))
-        y_upper = np.clip(np.exp(self.l0 + span_log), self.domain.y_min, self.domain.y_max)
-        y_lower = np.clip(np.exp(self.l0 - span_log), self.domain.y_min, self.domain.y_max)
-        return y_upper, y_lower
-
+        y_up = np.clip(np.exp(self.l0 + span_log), self.domain.y_min, self.domain.y_max)
+        y_lo = np.clip(np.exp(self.l0 - span_log), self.domain.y_min, self.domain.y_max)
+        return y_up, y_lo
 
 class RiskFieldComputer:
     def __init__(self, domain: DomainConfig, mapping_table: RiskMappingTable):
@@ -96,42 +95,50 @@ class RiskFieldComputer:
         a3 = 0.5 * (c2 + self.domain.y_max)
         return np.array([a1, a2, a3], dtype=np.float64)
 
-    def compute_field(self, params: RiskParameters) -> np.ndarray:
-        c1, c2 = self.sanitize_cutoffs(params.cutoff1, params.cutoff2)
-        anchors = self.compute_anchors(c1, c2)
-
+    def compute_field(self, params: RiskParameters) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # Grids
         xs = np.linspace(self.domain.x_min, self.domain.x_max, self.domain.nx, dtype=np.float64)
         ys = np.linspace(self.domain.y_min, self.domain.y_max, self.domain.ny, dtype=np.float64)
 
+        # Wealth-dependent gamma
+        c1, c2 = self.sanitize_cutoffs(params.cutoff1, params.cutoff2)
+        anchors = self.compute_anchors(c1, c2)
         gammas = params.get_gammas()
         gamma_y = np.interp(ys, anchors, gammas, left=gammas[0], right=gammas[-1])
-        gamma_field = gamma_y[:, None]  # broadcast along x
 
-        divisors = 1.0 + params.aggressiveness * (-xs)  # shape (nx,)
-        gamma_adjusted = gamma_field / divisors[None, :]  # (ny, nx)
+        # Broadcast and adjust over time
+        divisors = 1.0 + params.aggressiveness * (-xs)        # shape (nx,)
+        gamma_adj = (gamma_y[:, None]) / divisors[None, :]    # (ny, nx)
 
-        return self.mapping.map(gamma_adjusted)
+        # Map to risk
+        Z = self.mapping.map(gamma_adj)
+        return xs, ys, Z
 
+# -----------------------------------------------------------------------------
+# UI
 
-# --------------------------- Streamlit UI ---------------------------
+'''
+# 📊 Risk Assessment Field
 
-st.set_page_config(page_title="Risk Assessment Visualization", page_icon="📊", layout="wide")
+Interactive heatmap of risk level over Time × Wealth.
+'''
 
-st.markdown("## Risk Assessment Field — Interactive")
+# A bit of spacing
+''
+''
 
-# Controls in main area (not sidebar), so they're always visible.
 domain = DomainConfig()
 
 colA, colB, colC = st.columns(3)
 with colA:
-    gamma_deficit = st.slider("Gamma Deficit (γ₁)", 1.0, 25.0, 2.0, 0.01)
-    cutoff1 = st.slider("Cutoff 1 (c₁)", domain.y_min, domain.y_max, 0.90, 0.001)
+    gamma_deficit = st.slider('Gamma Deficit (γ₁)', 1.0, 25.0, 2.0, 0.01)
+    cutoff1 = st.slider('Cutoff 1 (c₁)', domain.y_min, domain.y_max, 0.90, 0.001)
 with colB:
-    gamma_normal = st.slider("Gamma Normal (γ₂)", 1.0, 25.0, 5.0, 0.01)
-    cutoff2 = st.slider("Cutoff 2 (c₂)", domain.y_min, domain.y_max, 1.30, 0.001)
+    gamma_normal = st.slider('Gamma Normal (γ₂)', 1.0, 25.0, 5.0, 0.01)
+    cutoff2 = st.slider('Cutoff 2 (c₂)', domain.y_min, domain.y_max, 1.30, 0.001)
 with colC:
-    gamma_surplus = st.slider("Gamma Surplus (γ₃)", 1.0, 25.0, 12.0, 0.01)
-    aggressiveness = st.slider("Aggressiveness (α)", 0.0, 2.0, 1.0, 0.01)
+    gamma_surplus = st.slider('Gamma Surplus (γ₃)', 1.0, 25.0, 12.0, 0.01)
+    aggressiveness = st.slider('Aggressiveness (α)', 0.0, 2.0, 1.0, 0.01)
 
 params = RiskParameters(
     gamma_deficit=gamma_deficit,
@@ -142,64 +149,85 @@ params = RiskParameters(
     aggressiveness=aggressiveness
 )
 
-# Compute field
+# Compute field + mask
 mapping = RiskMappingTable()
 computer = RiskFieldComputer(domain, mapping)
 masker = ParabolicMask(domain)
 
-xs = np.linspace(domain.x_min, domain.x_max, domain.nx, dtype=np.float64)
-ys = np.linspace(domain.y_min, domain.y_max, domain.ny, dtype=np.float64)
+xs, ys, Z = computer.compute_field(params)
 X, Y = np.meshgrid(xs, ys)
+mask = masker.compute_mask(X, Y)
 
-Z = computer.compute_field(params)
-mask = ~masker.compute_mask(X, Y)
-Z_masked = np.ma.array(Z, mask=mask)
+# Build DataFrames for Altair
+# Heat map data (only inside mask)
+heat_df = pd.DataFrame({
+    "x": X[mask].ravel(),
+    "y": Y[mask].ravel(),
+    "z": Z[mask].ravel()
+})
 
-# Colormap (cached implicitly by reconstruction cost being tiny)
-colors = [
-    (0.00, "#1a7d3a"),
-    (0.25, "#52c41a"),
-    (0.45, "#fadb14"),
-    (0.65, "#fa8c16"),
-    (0.85, "#f5222d"),
-    (1.00, "#820014"),
-]
-cmap = LinearSegmentedColormap.from_list("risk_gradient", colors)
-cmap.set_bad(color="#0a0a0a")
+# Parabolic boundaries (two lines)
+y_upper, y_lower = masker.get_boundaries(xs)
+bound_df = pd.DataFrame({
+    "x": np.concatenate([xs, xs]),
+    "y": np.concatenate([y_upper, y_lower]),
+    "which": np.concatenate([np.repeat("upper", len(xs)), np.repeat("lower", len(xs))])
+})
 
-# Figure
-fig, ax = plt.subplots(figsize=(11, 7))
-im = ax.imshow(
-    Z_masked,
-    origin="lower",
-    extent=[domain.x_min, domain.x_max, domain.y_min, domain.y_max],
-    aspect="auto",
-    cmap=cmap,
-    vmin=0.0,
-    vmax=1.0,
-    interpolation="bilinear",
+# Cutoff lines
+c1_s, c2_s = computer.sanitize_cutoffs(params.cutoff1, params.cutoff2)
+cuts_df = pd.DataFrame({
+    "x": [domain.x_min, domain.x_max, domain.x_min, domain.x_max],
+    "y": [c1_s, c1_s, c2_s, c2_s],
+    "which": ["c1", "c1", "c2", "c2"]
+})
+
+st.header('Risk heatmap', divider='gray')
+''
+
+# Altair chart: heatmap + boundaries + cutoffs
+# Custom segmented color scale (low→high risk)
+color_domain = [0.00, 0.25, 0.45, 0.65, 0.85, 1.00]
+color_range  = ["#1a7d3a", "#52c41a", "#fadb14", "#fa8c16", "#f5222d", "#820014"]
+
+base = alt.Chart().properties(width='container', height=520)
+
+heat = base.mark_rect().encode(
+    x=alt.X('x:Q', title='Time', scale=alt.Scale(domain=(domain.x_min, domain.x_max))),
+    y=alt.Y('y:Q', title='Wealth Level', scale=alt.Scale(domain=(domain.y_min, domain.y_max))),
+    color=alt.Color('z:Q',
+        title='Risk Level',
+        scale=alt.Scale(domain=color_domain, range=color_range, clamp=True)
+    ),
+    tooltip=[
+        alt.Tooltip('x:Q', format='.2f', title='Time'),
+        alt.Tooltip('y:Q', format='.3f', title='Wealth'),
+        alt.Tooltip('z:Q', format='.3f', title='Risk'),
+    ],
+).transform_calculate()  # placeholder to keep structure identical to example
+
+heat = heat.transform_calculate()  # no-op; keeps code minimal
+
+heat = heat.transform_filter(alt.datum.z >= 0)  # ensure valid
+
+line_bound = base.mark_line(strokeDash=[4,4], opacity=0.8).encode(
+    x='x:Q',
+    y='y:Q',
+    detail='which:N'
 )
 
-# Boundaries & cutoffs
-y_upper, y_lower = masker.get_boundaries(xs)
-ax.plot(xs, y_upper, "w--", lw=1.3, alpha=0.8)
-ax.plot(xs, y_lower, "w--", lw=1.3, alpha=0.8)
+line_cuts = base.mark_rule(strokeDash=[2,4], opacity=0.8, color='#e0e0e0').encode(
+    y='y:Q'
+)
 
-c1_s, c2_s = computer.sanitize_cutoffs(params.cutoff1, params.cutoff2)
-ax.axhline(c1_s, color="#e0e0e0", ls=":", lw=1.5, alpha=0.9)
-ax.axhline(c2_s, color="#e0e0e0", ls=":", lw=1.5, alpha=0.9)
+chart = alt.layer(
+    heat.data(heat_df),
+    line_bound.data(bound_df),
+    line_cuts.data(cuts_df)
+).resolve_scale(
+    color='independent'
+).configure_view(
+    strokeOpacity=0
+)
 
-# Labels
-ax.set_xlabel("Time")
-ax.set_ylabel("Wealth Level")
-ax.set_title("Risk Assessment Field")
-
-cbar = fig.colorbar(im, ax=ax, pad=0.02, aspect=30)
-cbar.set_label("Risk Level")
-
-ax.grid(True, alpha=0.2, ls=":", lw=0.5)
-ax.set_xlim(domain.x_min, domain.x_max)
-ax.set_ylim(domain.y_min, domain.y_max)
-
-st.pyplot(fig, use_container_width=True)
-plt.close(fig)  # ensure clean redraws on interaction
+st.altair_chart(chart, use_container_width=True)
