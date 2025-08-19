@@ -21,7 +21,7 @@ class DomainConfig:
     x_max: float = 0.0
     y_min: float = 0.5
     y_max: float = 2.0
-    nx: int = 420   # tuned for responsiveness in-browser
+    nx: int = 420   # tune for responsiveness
     ny: int = 320
 
 @dataclass
@@ -96,21 +96,17 @@ class RiskFieldComputer:
         return np.array([a1, a2, a3], dtype=np.float64)
 
     def compute_field(self, params: RiskParameters) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
-        # Grids
         xs = np.linspace(self.domain.x_min, self.domain.x_max, self.domain.nx, dtype=np.float64)
         ys = np.linspace(self.domain.y_min, self.domain.y_max, self.domain.ny, dtype=np.float64)
 
-        # Wealth-dependent gamma
         c1, c2 = self.sanitize_cutoffs(params.cutoff1, params.cutoff2)
         anchors = self.compute_anchors(c1, c2)
         gammas = params.get_gammas()
         gamma_y = np.interp(ys, anchors, gammas, left=gammas[0], right=gammas[-1])
 
-        # Broadcast and adjust over time
-        divisors = 1.0 + params.aggressiveness * (-xs)        # shape (nx,)
-        gamma_adj = (gamma_y[:, None]) / divisors[None, :]    # (ny, nx)
+        divisors = 1.0 + params.aggressiveness * (-xs)          # (nx,)
+        gamma_adj = (gamma_y[:, None]) / divisors[None, :]      # (ny, nx)
 
-        # Map to risk
         Z = self.mapping.map(gamma_adj)
         return xs, ys, Z
 
@@ -123,7 +119,7 @@ class RiskFieldComputer:
 Interactive heatmap of risk level over Time × Wealth.
 '''
 
-# A bit of spacing
+# spacing
 ''
 ''
 
@@ -158,76 +154,56 @@ xs, ys, Z = computer.compute_field(params)
 X, Y = np.meshgrid(xs, ys)
 mask = masker.compute_mask(X, Y)
 
-# Build DataFrames for Altair
-# Heat map data (only inside mask)
+# Data for charts
 heat_df = pd.DataFrame({
     "x": X[mask].ravel(),
     "y": Y[mask].ravel(),
     "z": Z[mask].ravel()
 })
 
-# Parabolic boundaries (two lines)
 y_upper, y_lower = masker.get_boundaries(xs)
 bound_df = pd.DataFrame({
     "x": np.concatenate([xs, xs]),
     "y": np.concatenate([y_upper, y_lower]),
-    "which": np.concatenate([np.repeat("upper", len(xs)), np.repeat("lower", len(xs))])
+    "which": (["upper"] * len(xs)) + (["lower"] * len(xs)),
 })
 
-# Cutoff lines
 c1_s, c2_s = computer.sanitize_cutoffs(params.cutoff1, params.cutoff2)
 cuts_df = pd.DataFrame({
-    "x": [domain.x_min, domain.x_max, domain.x_min, domain.x_max],
-    "y": [c1_s, c1_s, c2_s, c2_s],
-    "which": ["c1", "c1", "c2", "c2"]
+    "y": [c1_s, c2_s],
+    "which": ["c1", "c2"]
 })
 
 st.header('Risk heatmap', divider='gray')
 ''
 
-# Altair chart: heatmap + boundaries + cutoffs
-# Custom segmented color scale (low→high risk)
+# Altair: build charts with data passed to the constructor (Altair v5)
 color_domain = [0.00, 0.25, 0.45, 0.65, 0.85, 1.00]
 color_range  = ["#1a7d3a", "#52c41a", "#fadb14", "#fa8c16", "#f5222d", "#820014"]
 
-base = alt.Chart().properties(width='container', height=520)
-
-heat = base.mark_rect().encode(
+heat = alt.Chart(heat_df, width='container', height=520).mark_rect().encode(
     x=alt.X('x:Q', title='Time', scale=alt.Scale(domain=(domain.x_min, domain.x_max))),
     y=alt.Y('y:Q', title='Wealth Level', scale=alt.Scale(domain=(domain.y_min, domain.y_max))),
-    color=alt.Color('z:Q',
-        title='Risk Level',
-        scale=alt.Scale(domain=color_domain, range=color_range, clamp=True)
-    ),
+    color=alt.Color('z:Q', title='Risk Level',
+                    scale=alt.Scale(domain=color_domain, range=color_range, clamp=True)),
     tooltip=[
         alt.Tooltip('x:Q', format='.2f', title='Time'),
         alt.Tooltip('y:Q', format='.3f', title='Wealth'),
         alt.Tooltip('z:Q', format='.3f', title='Risk'),
     ],
-).transform_calculate()  # placeholder to keep structure identical to example
+)
 
-heat = heat.transform_calculate()  # no-op; keeps code minimal
-
-heat = heat.transform_filter(alt.datum.z >= 0)  # ensure valid
-
-line_bound = base.mark_line(strokeDash=[4,4], opacity=0.8).encode(
+line_bound = alt.Chart(bound_df, width='container', height=520).mark_line(strokeDash=[4,4], opacity=0.8).encode(
     x='x:Q',
     y='y:Q',
     detail='which:N'
 )
 
-line_cuts = base.mark_rule(strokeDash=[2,4], opacity=0.8, color='#e0e0e0').encode(
+# Horizontal rules at c1 and c2
+line_cuts = alt.Chart(cuts_df, width='container', height=520).mark_rule(strokeDash=[2,4], opacity=0.8, color='#e0e0e0').encode(
     y='y:Q'
 )
 
-chart = alt.layer(
-    heat.data(heat_df),
-    line_bound.data(bound_df),
-    line_cuts.data(cuts_df)
-).resolve_scale(
-    color='independent'
-).configure_view(
-    strokeOpacity=0
-)
+chart = alt.layer(heat, line_bound, line_cuts).configure_view(strokeOpacity=0)
 
 st.altair_chart(chart, use_container_width=True)
